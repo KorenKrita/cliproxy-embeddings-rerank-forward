@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            ext: dylib
+            zig_target: x86_64-macos
+            tags: netgo,osusergo
+          - goos: darwin
+            goarch: arm64
+            ext: dylib
+            zig_target: aarch64-macos
+            tags: netgo,osusergo
+          - goos: linux
+            goarch: amd64
+            ext: so
+            zig_target: x86_64-linux-gnu
+            tags: ""
+          - goos: linux
+            goarch: arm64
+            ext: so
+            zig_target: aarch64-linux-gnu
+            tags: ""
+          - goos: windows
+            goarch: amd64
+            ext: dll
+            zig_target: x86_64-windows-gnu
+            tags: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Install zig
+        run: |
+          curl -L https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz | tar -xJ -C /tmp
+          echo "/tmp/zig-linux-x86_64-0.14.0" >> "$GITHUB_PATH"
+
+      # Go runtime unconditionally passes -lresolv and -framework CoreFoundation
+      # /Security on darwin. zig on Linux has no macOS SDK. The wrapper strips
+      # these; -Wl,-undefined,dynamic_lookup lets residual undefined symbols
+      # resolve at runtime on the real macOS target.
+      - name: Create zig CC wrapper for darwin
+        if: matrix.goos == 'darwin'
+        run: |
+          cat > /tmp/zigcc-darwin.sh <<'WRAPPER'
+          #!/bin/bash
+          args=()
+          i=0
+          while [ $i -lt $# ]; do
+            i=$((i + 1))
+            arg="${!i}"
+            case "$arg" in
+              -lresolv|-lpthread|-ldl) ;;
+              -framework)
+                i=$((i + 1))
+                ;;
+              *) args+=("$arg") ;;
+            esac
+          done
+          exec zig cc -target "${ZIG_TARGET}" "${args[@]}"
+          WRAPPER
+          chmod +x /tmp/zigcc-darwin.sh
+          echo "=== wrapper content ===" && cat /tmp/zigcc-darwin.sh
+
+      - name: Build shared library
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+          CC: ${{ matrix.goos == 'darwin' && '/tmp/zigcc-darwin.sh' || format('zig cc -target {0}', matrix.zig_target) }}
+          ZIG_TARGET: ${{ matrix.zig_target }}
+          CGO_LDFLAGS: ${{ matrix.goos == 'darwin' && '-Wl,-undefined,dynamic_lookup' || '' }}
+          TAGS: ${{ matrix.tags }}
+        run: |
+          go build -buildmode=c-shared ${TAGS:+-tags "$TAGS"} -o embeddings-forward.${{ matrix.ext }} .
+
+      - name: Package zip
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="embeddings-forward_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          zip "$ARCHIVE" embeddings-forward.${{ matrix.ext }}
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: |
+          sha256sum *.zip > checksums.txt
+          echo "=== checksums.txt ===" && cat checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            artifacts/*.zip \
+            artifacts/checksums.txt \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

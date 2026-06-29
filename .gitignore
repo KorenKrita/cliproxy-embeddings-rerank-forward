@@ -1,0 +1,15 @@
+# Build artifacts (binaries and C header from -buildmode=c-shared)
+*.dylib
+*.so
+*.dll
+embeddings-forward.h
+embeddings-forward
+cliproxy-embeddings-forward
+
+# Test artifacts
+coverage.out
+coverage.html
+
+# Local config with secrets
+.env
+config.local.yaml
