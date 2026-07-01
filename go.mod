@@ -1,4 +1,4 @@
-module github.com/router-for-me/cliproxy-embeddings-forward
+module github.com/KorenKrita/cliproxy-embeddings-rerank-forward
 
 go 1.26
 

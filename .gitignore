@@ -4,7 +4,7 @@
 *.dll
 embeddings-forward.h
 embeddings-forward
-cliproxy-embeddings-forward
+cliproxy-embeddings-rerank-forward
 
 # Test artifacts
 coverage.out
