@@ -79,7 +79,32 @@ plugins:
             # no models → catch-all: accepts any model, forwards as-is
 ```
 
-### Legacy single-provider (v0.1/v0.2, still supported)
+### Flat single-provider (simple, UI-friendly)
+
+For the common case of one embeddings provider and/or one rerank provider, use flat fields — these map directly to CPA's config form:
+
+```yaml
+plugins:
+  enabled: true
+  dir: plugins
+  configs:
+    embeddings-forward:
+      enabled: true
+      # Embeddings (optional — configure if you need /v1/embeddings)
+      upstream_base_url: "https://api.openai-compatible.example.com/v1"
+      upstream_api_key: "sk-your-key"
+      upstream_path: "/embeddings"                              # optional, defaults to /embeddings
+      upstream_models: "small=text-embedding-3-small, large"   # optional, comma-separated; empty = passthrough
+      # Rerank (optional — configure if you need /v1/rerank)
+      rerank_base_url: "https://api.openai-compatible.example.com/v1"
+      rerank_api_key: "rk-your-key"
+      rerank_path: "/rerank"                                    # optional, defaults to /rerank
+      rerank_models: "fast=rerank-8b, rerank-0.6b"              # optional, comma-separated; empty = passthrough
+```
+
+Each module is independent — configure embeddings only, rerank only, or both. Flat fields are migrated to a single `legacy` provider per module. The `*_models` format is comma-separated entries of either `name` (alias defaults to name) or `alias=name`. Empty `*_models` means catch-all (accept any model, passthrough).
+
+### Legacy single-provider (v0.1, still supported)
 
 ```yaml
 plugins:
@@ -93,7 +118,7 @@ plugins:
       upstream_path: "/embeddings"          # optional, defaults to /embeddings
 ```
 
-Legacy config is auto-migrated: the embeddings module is enabled with a single `legacy` provider using the same base URL/key. The provider has no `models` list, so it accepts any model (passthrough). Rerank is **not** enabled by legacy config — use the new modular schema to configure rerank.
+Legacy v0.1 config (embeddings only, no models) is auto-migrated: embeddings module enabled with a single `legacy` provider, catch-all passthrough. Rerank requires flat `rerank_*` fields or the modular schema.
 
 ### Provider/model routing
 

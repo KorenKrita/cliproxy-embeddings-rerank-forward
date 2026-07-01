@@ -184,7 +184,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {}
 
-const registerJSON = `{"schema_version":1,"metadata":{"Name":"embeddings-rerank-forward","Version":"0.2.0","Author":"KorenKrita","GitHubRepository":"https://github.com/KorenKrita/cliproxy-embeddings-rerank-forward","ConfigFields":[{"Name":"embeddings","Type":"object","Description":"Embeddings module: {enabled, providers: [{name, base_url, path, api_keys[], models: [{name, alias}]}]}"},{"Name":"rerank","Type":"object","Description":"Rerank module: {enabled, providers: [{name, base_url, path, api_keys[], models: [{name, alias}]}]}"}]},"capabilities":{"management_api":true}}`
+const registerJSON = `{"schema_version":1,"metadata":{"Name":"embeddings-rerank-forward","Version":"0.2.0","Author":"KorenKrita","GitHubRepository":"https://github.com/KorenKrita/cliproxy-embeddings-rerank-forward","ConfigFields":[{"Name":"upstream_base_url","Type":"string","Description":"Embeddings upstream base URL, e.g. https://api.openai.com/v1"},{"Name":"upstream_api_key","Type":"string","Description":"Embeddings upstream API key"},{"Name":"upstream_path","Type":"string","Description":"Embeddings upstream path; defaults to /embeddings"},{"Name":"upstream_models","Type":"string","Description":"Embeddings models, comma-separated. Use alias=name or just name. Empty = accept any model (passthrough)"},{"Name":"rerank_base_url","Type":"string","Description":"Rerank upstream base URL"},{"Name":"rerank_api_key","Type":"string","Description":"Rerank upstream API key"},{"Name":"rerank_path","Type":"string","Description":"Rerank upstream path; defaults to /rerank"},{"Name":"rerank_models","Type":"string","Description":"Rerank models, comma-separated. Use alias=name or just name. Empty = accept any model (passthrough)"},{"Name":"embeddings","Type":"object","Description":"Advanced: full embeddings module config with multiple providers. See README. Overrides flat fields above"},{"Name":"rerank","Type":"object","Description":"Advanced: full rerank module config with multiple providers. See README. Overrides flat fields above"}]},"capabilities":{"management_api":true}}`
 
 // HandleMethod dispatches an RPC method. Exported for unit testing.
 func HandleMethod(method string, reqBody []byte) ([]byte, error) {
@@ -209,13 +209,18 @@ func HandleMethod(method string, reqBody []byte) ([]byte, error) {
 	}
 }
 
-// legacyConfig holds the v0.1/v0.2 single-provider fields for backward compat.
-// If present and the new modular fields are empty, these are migrated into the
-// new schema so existing configs keep working without changes.
+// legacyConfig holds the v0.1/v0.2 single-provider flat fields for backward
+// compat and UI-friendliness. Each module has its own flat fields; when the
+// modular object is absent, flat fields migrate into a single provider.
 type legacyConfig struct {
 	UpstreamBaseURL string `yaml:"upstream_base_url"`
 	UpstreamAPIKey  string `yaml:"upstream_api_key"`
 	UpstreamPath    string `yaml:"upstream_path"`
+	UpstreamModels  string `yaml:"upstream_models"`
+	RerankBaseURL   string `yaml:"rerank_base_url"`
+	RerankAPIKey    string `yaml:"rerank_api_key"`
+	RerankPath      string `yaml:"rerank_path"`
+	RerankModels    string `yaml:"rerank_models"`
 }
 
 // moduleIsEmpty reports whether a module has no providers configured.
@@ -223,11 +228,42 @@ func moduleIsEmpty(m Module) bool {
 	return !m.Enabled && len(m.Providers) == 0
 }
 
+// parseModels parses a comma-separated model list into ModelMapping slices.
+// Each entry is either "name" (alias defaults to name) or "alias=name".
+// Empty entries are skipped. Returns nil if input is empty.
+func parseModels(s string) []ModelMapping {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var models []ModelMapping
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if idx := strings.Index(part, "="); idx >= 0 {
+			alias := strings.TrimSpace(part[:idx])
+			name := strings.TrimSpace(part[idx+1:])
+			if alias == "" || name == "" {
+				continue
+			}
+			models = append(models, ModelMapping{Alias: alias, Name: name})
+		} else {
+			models = append(models, ModelMapping{Name: part})
+		}
+	}
+	return models
+}
+
 // ParseConfig extracts upstream settings from the config_yaml payload.
-// Supports both the new modular schema (embeddings/rerank with providers) and
-// the legacy single-provider fields (upstream_base_url/upstream_api_key/...).
-// Legacy fields are migrated into the new schema when the modular fields are
-// absent, so existing configs keep working. Exported for unit testing.
+// Supports three config styles, in priority order:
+//  1. Modular: embeddings/rerank objects with providers[] (multi-provider)
+//  2. Flat rerank: rerank_base_url/rerank_api_key/rerank_path (single provider)
+//  3. Flat legacy: upstream_base_url/upstream_api_key/upstream_path (embeddings only)
+//
+// Flat fields are migrated per-module: a module uses modular config if present,
+// otherwise its flat fields (if any). Exported for unit testing.
 func ParseConfig(reqBody []byte) error {
 	var req struct {
 		ConfigYAML []byte `json:"config_yaml"`
@@ -239,21 +275,37 @@ func ParseConfig(reqBody []byte) error {
 	if err := yaml.Unmarshal(req.ConfigYAML, &c); err != nil {
 		return fmt.Errorf("parse config_yaml: %w", err)
 	}
-	// Migrate legacy single-provider config if modular fields are absent.
-	if moduleIsEmpty(c.Embeddings) && moduleIsEmpty(c.Rerank) {
-		var lc legacyConfig
-		if err := yaml.Unmarshal(req.ConfigYAML, &lc); err == nil && lc.UpstreamBaseURL != "" && lc.UpstreamAPIKey != "" {
-			c.Embeddings = Module{
-				Enabled: true,
-				Providers: []Provider{{
-					Name:    "legacy",
-					BaseURL: lc.UpstreamBaseURL,
-					Path:    lc.UpstreamPath,
-					APIKeys: []string{lc.UpstreamAPIKey},
-				}},
-			}
+	var lc legacyConfig
+	yaml.Unmarshal(req.ConfigYAML, &lc) // best-effort; ignored on error
+
+	// Embeddings: modular wins, else flat legacy fields.
+	if moduleIsEmpty(c.Embeddings) && lc.UpstreamBaseURL != "" && lc.UpstreamAPIKey != "" {
+		c.Embeddings = Module{
+			Enabled: true,
+			Providers: []Provider{{
+				Name:    "legacy",
+				BaseURL: lc.UpstreamBaseURL,
+				Path:    lc.UpstreamPath,
+				APIKeys: []string{lc.UpstreamAPIKey},
+				Models:  parseModels(lc.UpstreamModels),
+			}},
 		}
 	}
+
+	// Rerank: modular wins, else flat rerank fields.
+	if moduleIsEmpty(c.Rerank) && lc.RerankBaseURL != "" && lc.RerankAPIKey != "" {
+		c.Rerank = Module{
+			Enabled: true,
+			Providers: []Provider{{
+				Name:    "legacy",
+				BaseURL: lc.RerankBaseURL,
+				Path:    lc.RerankPath,
+				APIKeys: []string{lc.RerankAPIKey},
+				Models:  parseModels(lc.RerankModels),
+			}},
+		}
+	}
+
 	cfgMu.Lock()
 	cfg = c
 	cfgMu.Unlock()

@@ -486,6 +486,83 @@ upstream_path: /embeddings
 	}
 }
 
+func TestParseModels_Formats(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []ModelMapping
+	}{
+		{"", nil},
+		{"model-a", []ModelMapping{{Name: "model-a"}}},
+		{"alias-a=real-a", []ModelMapping{{Alias: "alias-a", Name: "real-a"}}},
+		{"m1, m2 , m3", []ModelMapping{{Name: "m1"}, {Name: "m2"}, {Name: "m3"}}},
+		{"alias=real, plain", []ModelMapping{{Alias: "alias", Name: "real"}, {Name: "plain"}}},
+		{"=bad", nil}, // empty alias → skipped
+		{"bad=", nil}, // empty name → skipped
+		{" alias = real ", []ModelMapping{{Alias: "alias", Name: "real"}}}, // trimmed
+	}
+	for _, tc := range cases {
+		got := parseModels(tc.in)
+		if len(got) != len(tc.want) {
+			t.Fatalf("parseModels(%q) = %+v, want %+v", tc.in, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("parseModels(%q)[%d] = %+v, want %+v", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestParseConfig_FlatRerankMigrated(t *testing.T) {
+	yaml := `rerank_base_url: https://api.example.com/v1
+rerank_api_key: rk-test
+rerank_path: /rerank
+rerank_models: fast=rerank-8b, rerank-0.6b
+`
+	if err := ParseConfig(makeReconfigurePayload(yaml)); err != nil {
+		t.Fatalf("ParseConfig error = %v", err)
+	}
+	c := GetConfig()
+	if !c.Rerank.Enabled || len(c.Rerank.Providers) != 1 {
+		t.Fatalf("Rerank not migrated: %+v", c.Rerank)
+	}
+	p := c.Rerank.Providers[0]
+	if p.BaseURL != "https://api.example.com/v1" || len(p.APIKeys) != 1 || p.APIKeys[0] != "rk-test" {
+		t.Fatalf("provider = %+v", p)
+	}
+	if len(p.Models) != 2 {
+		t.Fatalf("models = %+v, want 2", p.Models)
+	}
+	if p.Models[0].Alias != "fast" || p.Models[0].Name != "rerank-8b" {
+		t.Fatalf("model[0] = %+v", p.Models[0])
+	}
+	if p.Models[1].Name != "rerank-0.6b" || p.Models[1].Alias != "" {
+		t.Fatalf("model[1] = %+v", p.Models[1])
+	}
+	// Embeddings should not be enabled by rerank-only flat config.
+	if c.Embeddings.Enabled {
+		t.Fatal("Embeddings should not be enabled by rerank flat config")
+	}
+}
+
+func TestParseConfig_FlatEmbeddingModels(t *testing.T) {
+	yaml := `upstream_base_url: https://api.example.com/v1
+upstream_api_key: sk-test
+upstream_models: small=text-embedding-3-small, text-embedding-3-large
+`
+	if err := ParseConfig(makeReconfigurePayload(yaml)); err != nil {
+		t.Fatalf("ParseConfig error = %v", err)
+	}
+	c := GetConfig()
+	p := c.Embeddings.Providers[0]
+	if len(p.Models) != 2 {
+		t.Fatalf("models = %+v, want 2", p.Models)
+	}
+	if p.Models[0].Alias != "small" || p.Models[0].Name != "text-embedding-3-small" {
+		t.Fatalf("model[0] = %+v", p.Models[0])
+	}
+}
+
 func TestResolveProviders_CatchAllEmptyModels(t *testing.T) {
 	m := Module{
 		Enabled: true,
